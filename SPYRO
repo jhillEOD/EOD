@@ -1,450 +1,200 @@
-import requests
-import json
 from datetime import datetime, timedelta
-from urllib.parse import urlparse, quote_plus
-import PyPDF2
-import io
-import time
-import random
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-import os
-import arxiv # Import the arxiv library
-from duckduckgo_search import DDGS # Explicitly import DDGS
+from urllib.parse import quote_plus
+import json
+import requests
+import urllib.request
+import xml.etree.ElementTree as ET
 
-# Define a subset of keywords for filtering
-keywords_subset = ['UXO', 'unexploded', 'ordnance', 'EOD', 'bomb', 'grenade', 'missile', 'landmine', 'IED', 'explosive', 'detonation', 'blast effects', 'fragmentation', 'detection systems', 'remote sensing', 'drone', 'UAV', 'CBRN', 'chemical agents', 'biological agents', 'radiological hazards']
+keywords_subset = [
+    'UXO', 'unexploded', 'ordnance', 'EOD', 'bomb', 'grenade', 'missile', 'landmine',
+    'Improvised explosive', 'detonation', 'blast effects', 'fragmentation', 'detection systems',
+    'remote sensing', 'drone', 'UAV', 'CBRN', 'chemical agents', 'biological agents',
+]
 
-# Redefine find_matching_keywords to explicitly use the subset
 def find_matching_keywords(text, keywords_subset):
-    """Finds keywords from a subset that are present in a given text."""
     text_lower = text.lower()
     return [kw for kw in keywords_subset if kw.lower() in text_lower]
 
-# Placeholder function for CrossRef query - Modified to fetch from real API
-def crossref_query(keywords_query, max_results=20):
-    print("Running CrossRef query...")
-    # Define the CrossRef API base URL
-    crossref_base_url = "https://api.crossref.org/works"
+# These keywords help drive the summary logic (add more as needed)
+tech_keywords = ['detection', 'sensor', 'remote', 'neutralization', 'drone', 'tech', 'robot', 'system', 'algorithm', 'autonomous', 'UAV']
+training_keywords = ['training', 'simulation', 'practice', 'curriculum', 'instruct', 'educat', 'school', 'course', 'exercise']
+threat_keywords = ['threat', 'hazard', 'danger', 'risk', 'terror', 'attack', 'improvised', 'munition', 'CBRN', 'chemical', 'biological', 'radiological', 'nuclear', 'explosive', 'blast', 'unexploded', 'IED']
+hazard_keywords = ['hazard', 'danger', 'risk', 'blister', 'toxic', 'injury', 'fragment', 'blast']
 
-    all_crossref_results = []
-    processed_dois = set() # Use a set to track processed DOIs
+def generate_summary(title, abstract):
+    content = (title + " " + abstract).lower()
+    summary_segments = []
+    if any(word in content for word in tech_keywords):
+        summary_segments.append("The study discusses advances relevant to military EOD technology and detection systems.")
+    if any(word in content for word in training_keywords):
+        summary_segments.append("It contributes knowledge applicable to EOD training and personnel preparedness.")
+    if any(word in content for word in threat_keywords):
+        summary_segments.append("Findings help illuminate current or emerging threats related to explosive ordnance.")
+    if any(word in content for word in hazard_keywords):
+        summary_segments.append("The research examines hazards and risks inherent in military ordnance disposal.")
+    if not summary_segments:
+        summary_segments.append("This research may offer insight into military explosive ordnance disposal policy or operations.")
+    return " ".join(summary_segments)
 
-    print(f" Attempting CrossRef API query for keywords: {keywords_query}")
-
-    # Construct the query parameters
-    params = {
-        'query': keywords_query,
-        'rows': max_results, # Number of results per request
-        'sort': 'relevance', # Sort by relevance
-        # CrossRef API does not have a direct date range filter in the /works endpoint query.
-        # We will fetch and filter by date later in run_all_queries_and_filter.
-        'mailto': 'your.email@example.com' # CrossRef requests a polite pool email
-    }
-
-    try:
-        response = requests.get(crossref_base_url, params=params)
-
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                # Use the structure provided by the user: data['message']['items']
-                articles = data.get('message', {}).get('items', [])
-
-
-                if not articles:
-                    print(" CrossRef API returned no results for this query.")
-                    return []
-
-                for article in articles:
-                    doi = article.get('DOI')
-                    if doi and doi not in processed_dois:
-                        processed_dois.add(doi)
-
-                        # Extract data using the structure provided by the user
-                        title = article.get('title', ['No Title'])[0] if article.get('title') else 'No Title'
-                        authors_list = [f"{a.get('given', '')} {a.get('family', '')}".strip() for a in article.get('author', [])]
-                        # Combine abstract and subtitle if available, as abstract might be missing
-                        abstract = article.get('abstract', 'No abstract available')
-                        subtitle = article.get('subtitle', [''])[0] if article.get('subtitle') else ''
-                        if abstract == 'No abstract available' and subtitle:
-                            abstract = subtitle # Use subtitle if no abstract
-
-
-                        # Extract publication date using 'created' field as provided by user
-                        pub_date_raw = article.get('created', {}).get('date-time', '')
-                        pub_date = 'Unknown'
-                        if pub_date_raw:
-                            try:
-                                # Extract just the date part (YYYY-MM-DD)
-                                pub_date = pub_date_raw[:10]
-                            except Exception as date_e:
-                                print(f" Error processing CrossRef 'created' date '{pub_date_raw}': {date_e}")
-                                pub_date = 'Unknown' # Fallback
-
-
-                        source = article.get('container-title', ['No Source'])[0] if article.get('container-title') else 'No Source'
-                        article_url = article.get('URL', f"https://doi.org/{doi}" if doi else 'No URL')
-
-
-                        result = {
-                            "type": "academic_publication",
-                            "title": title,
-                            "authors_or_inventors": authors_list,
-                            "abstract_or_summary": abstract,
-                            "publication_or_filing_date": pub_date,
-                            "source": source,
-                            "experiment_type": "Unknown", # CrossRef data structure doesn't typically include this
-                            "key_contributions": "To be added in post-processing.",
-                            "institution_or_assignee": "To be extracted from author affiliations if available (not directly in search results).", # Affiliations are complex in CrossRef
-                            "affiliation_flag": "Pending review",
-                            "doi_or_url": doi if doi else article_url # Prefer DOI if available
-                        }
-                        all_crossref_results.append(result)
-
-                print(f" CrossRef API query finished. Collected {len(all_crossref_results)} results.")
-                return all_crossref_results
-
-            except json.JSONDecodeError:
-                print(" CrossRef API response was not valid JSON.")
-                print(f" Response text: {response.text[:500]}...")
-                return []
-            except Exception as e:
-                 print(f" An unexpected error occurred processing CrossRef results: {e}")
-                 if hasattr(response, 'text'):
-                     print(f" Response text leading to error: {response.text[:500]}...")
-                 return []
-
-
-        elif response.status_code == 429:
-            print(" CrossRef API rate limit hit. Please wait before trying again.")
-            # Implement a delay or retry logic if necessary, for now just return empty
-            return []
-        else:
-            print(f" CrossRef API query failed with status code: {response.status_code}")
-            if hasattr(response, 'text'):
-                 print(f" Response text: {response.text}")
-            return []
-
-    except requests.exceptions.RequestException as e:
-        print(f" Request error during CrossRef API query: {e}")
-        return []
-
-
-# Placeholder function for arXiv query - Modified to integrate real arXiv API
-def arxiv_query(keywords_query, max_results=20):
-    print("Running arXiv query...")
+def arxiv_query(keywords_query, max_results=50, days=30):
     all_arxiv_results = []
-    processed_arxiv_ids = set() # Use a set to track processed arXiv IDs
-
-    print(f" Attempting arXiv API query for keywords: {keywords_query}")
-
-    try:
-        # Configure arXiv search
-        search = arxiv.Search(
-            query=keywords_query,
-            max_results=max_results,
-            sort_by=arxiv.SortCriterion.SubmittedDate,
-            sort_order=arxiv.SortOrder.Descending
-        )
-
-        # Retrieve and process results
-        for result in search.results():
-             # Use entry_id as a unique identifier
-             arxiv_id = result.entry_id
-
-             if arxiv_id and arxiv_id not in processed_arxiv_ids:
-                 processed_arxiv_ids.add(arxiv_id)
-
-                 title = result.title
-                 authors_list = [author.name for author in result.authors]
-                 # Format the publication date as YYYY-MM-DD
-                 pub_date = result.published.date().strftime('%Y-%m-%d') if result.published else 'Unknown'
-                 abstract = result.summary
-                 source = 'arXiv'
-                 article_url = result.entry_id # Use the entry_id as the URL/identifier for arXiv
-
-
-                 result_dict = {
-                     "type": "academic_preprint",
-                     "title": title,
-                     "authors_or_inventors": authors_list,
-                     "abstract_or_summary": abstract,
-                     "publication_or_filing_date": pub_date,
-                     "source": source,
-                     "experiment_type": "Unknown", # arXiv data structure doesn't typically include this
-                     "key_contributions": "To be added in post-processing.",
-                     "institution_or_assignee": "To be extracted from author affiliations if available (not directly in search results).", # Affiliations are often in the abstract/metadata
-                     "affiliation_flag": "Not Applicable",
-                     "doi_or_url": article_url
-                 }
-                 all_arxiv_results.append(result_dict)
-
-
-        print(f" arXiv API query finished. Collected {len(all_arxiv_results)} results.")
-        return all_arxiv_results
-
-    except Exception as e:
-        print(f" An error occurred during arXiv API query: {e}")
-        return []
-
-
-# Function to perform web searches for PDFs using duckduckgo_search
-def web_search_pdfs(keywords_list, days=30, max_results=20):
-    print(f"Attempting web search for PDFs for keywords: {', '.join(keywords_list)}")
-
-    all_web_results = []
-    processed_urls = set() # Use a set to track processed URLs
-
-    # Construct the search query using DuckDuckGo search operators
-    query_string = " OR ".join([f'"{kw}"' if " " in kw else kw for kw in keywords_list]) + " filetype:pdf"
-
-    # Add date filtering using duckduckgo_search timelimit
-    timelimit = None
-    if days <= 30:
-        timelimit = 'm'
-    elif days <= 365:
-        timelimit = 'y'
-
-    print(f" Constructed web search query: {query_string}")
-    if timelimit:
-        print(f" Using timelimit: {timelimit}")
-
-    request_timeout = 10 # seconds
-    pdf_size_limit = 10 * 1024 * 1024 # bytes
-
-    # Configure retry strategy for requests
-    retry_strategy = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"]
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    http = requests.Session()
-    http.mount("http://", adapter)
-    http.mount("https://", adapter)
+    processed_urls = set()
+    base_url = 'http://export.arxiv.org/api/query?'
+    escaped_keywords = quote_plus(keywords_query)
+    search_query = f'all:{escaped_keywords}'
+    query_url = f"{base_url}search_query={search_query}&start=0&max_results={max_results}&sortBy=submittedDate"
 
     try:
-        with DDGS() as ddgs:
-            ddgs_max_results = min(max_results * 2, 100)
-
-            delay_seconds = 2
-            jitter_range = 1
-
-            search_count = 0
-
-            for r in ddgs.text(keywords=query_string, timelimit=timelimit, max_results=ddgs_max_results):
-                search_count += 1
-                url = r.get('href')
-                title = r.get('title', 'No Title')
-                abstract_snippet = r.get('body', 'No summary available')
-
-                if url and url not in processed_urls:
-                    if len(all_web_results) >= max_results:
-                         print(" Reached max_results for web search, stopping fetching.")
-                         break
-
-                    processed_urls.add(url)
-
-                    publication_date = 'Unknown' # Mark as unknown
-
-                    try:
-                        source = urlparse(url).netloc if urlparse(url).netloc else 'Web Search (Unknown Source)'
-                    except Exception:
-                        source = 'Web Search (Unknown Source)'
-
+        with urllib.request.urlopen(query_url) as url_response:
+            response_data = url_response.read().decode('utf-8')
+            atom_namespace = '{http://www.w3.org/2005/Atom}'
+            root = ET.fromstring(response_data)
+            for entry in root.findall(f'{atom_namespace}entry'):
+                title = entry.find(f'{atom_namespace}title').text.strip() if entry.find(f'{atom_namespace}title') is not None else ''
+                abstract = entry.find(f'{atom_namespace}summary').text.strip() if entry.find(f'{atom_namespace}summary') is not None else ''
+                published_date_str = entry.find(f'{atom_namespace}published').text.strip() if entry.find(f'{atom_namespace}published') is not None else ''
+                authors_list = [
+                    author_elem.find(f'{atom_namespace}name').text.strip()
+                    for author_elem in entry.findall(f'{atom_namespace}author')
+                    if author_elem.find(f'{atom_namespace}name') is not None
+                ]
+                if not authors_list:
                     authors_list = ['Unknown Authors']
-                    institution = 'Unknown Institution'
-                    extracted_pdf_text = ""
-
-                    if url and url.lower().endswith('.pdf'):
-                        try:
-                            with http.get(url, stream=True, timeout=request_timeout) as pdf_response:
-                                pdf_response.raise_for_status()
-
-                                content_type = pdf_response.headers.get('Content-Type', '')
-                                if 'application/pdf' not in content_type:
-                                    pdf_response.close()
-                                    continue
-
-                                content_length = pdf_response.headers.get('Content-Length')
-                                if content_length and int(content_length) > pdf_size_limit:
-                                    print(f"  Skipping PDF download, size ({int(content_length)} bytes) exceeds limit ({pdf_size_limit} bytes).")
-                                    pdf_response.close()
-                                else:
-                                    pdf_content = pdf_response.content
-                                    pdf_file_object = io.BytesIO(pdf_content)
-
-                                    try:
-                                        pdf_reader = PyPDF2.PdfReader(pdf_file_object)
-                                        num_pages = len(pdf_reader.pages)
-                                        for page_num in range(num_pages):
-                                            if page_num >= 10:
-                                                 break
-                                            page_obj = pdf_reader.pages[page_num]
-                                            try:
-                                                page_text = page_obj.extract_text()
-                                                if page_text:
-                                                    extracted_pdf_text += page_text + "\n"
-                                            except Exception as page_e:
-                                                print(f"  Error extracting text from page {page_num}: {page_e}")
-
-                                    except PyPDF2.errors.PdfReadError as pdf_e:
-                                        print(f"  Error reading PDF file (PyPDF2): {pdf_e}")
-                                    except Exception as pdf_e:
-                                         print(f"  An unexpected error occurred during PDF text extraction: {pdf_e}")
-
-                        except requests.exceptions.Timeout:
-                            print(f"  Request timed out while fetching PDF: {url}")
-                        except requests.exceptions.RequestException as req_e:
-                            print(f"  Error fetching PDF: {req_e}")
-                        except Exception as fetch_e:
-                             print(f"  An unexpected error occurred during PDF fetching: {fetch_e}")
-
-                    cleaned_extracted_text = ' '.join(extracted_pdf_text.split()) if extracted_pdf_text else ""
-
-                    result = {
-                        "type": "web_document",
+                article_url = next(
+                    (link.get('href') for link in entry.findall(f'{atom_namespace}link')
+                     if link.get('type') == 'text/html' or link.get('rel') == 'alternate'),
+                    ''
+                )
+                if article_url and article_url not in processed_urls:
+                    processed_urls.add(article_url)
+                    all_arxiv_results.append({
+                        "type": "academic_preprint",
                         "title": title,
                         "authors_or_inventors": authors_list,
-                        "abstract_or_summary": abstract_snippet + (" [Text extracted from PDF]" if extracted_pdf_text else ""),
-                        "full_text": cleaned_extracted_text,
-                        "publication_or_filing_date": publication_date,
-                        "source": source,
+                        "abstract_or_summary": abstract,
+                        "publication_or_filing_date": published_date_str,
+                        "source": "arXiv",
                         "experiment_type": "Unknown",
-                        "key_contributions": "To be added in post-processing.",
-                        "institution_or_assignee": institution,
-                        "affiliation_flag": "Pending review",
-                        "doi_or_url": url
-                    }
-                    all_web_results.append(result)
-
-                if search_count < ddgs_max_results:
-                    sleep_time = delay_seconds + random.uniform(0, jitter_range)
-                    time.sleep(sleep_time)
-
-            print(f"DuckDuckGo Search finished. Collected {len(all_web_results)} results.")
-
+                        "key_contributions": "",
+                        "institution_or_assignee": "",
+                        "affiliation_flag": "",
+                        "doi_or_url": article_url
+                    })
     except Exception as e:
-        print(f"An error occurred during DuckDuckGo Search: {e}")
+        print(f"arXiv error: {e}")
 
-    print(f"Web search for PDFs finished. Collected {len(all_web_results)} unique results.")
-    return all_web_results
-
-# Placeholder function for MDPI query or web search (kept for completeness but not called in run_all_queries_and_filter)
-def mdpi_query_or_search(keywords_list, days=30, max_results=20, page_size=100):
-    print("Running MDPI query or web search...")
-    print(" MDPI API query/web search skipped or failed.")
-    return []
-
-# The main function to run all queries and filter results
-def run_all_queries_and_filter(keywords_list, days_for_search, max_results_per_source=50):
-    keywords_list_for_search = keywords_list
-    keywords_query_for_search = " OR ".join([f'"{kw}"' if " " in kw else kw for kw in keywords_list_for_search])
-
-    print(f"Running search with keywords list: {keywords_list_for_search}")
-    print(f"Constructed keywords query string (truncated): {keywords_query_for_search[:500]}...")
-
-    print("Running CrossRef query...")
-    crossref_results = crossref_query(keywords_query_for_search, max_results=max_results_per_source)
-    print(f"CrossRef returned {len(crossref_results)} results.")
-
-    print("Running arXiv query...")
-    arxiv_results = arxiv_query(keywords_query_for_search, max_results=max_results_per_source)
-    print(f"arXiv returned {len(arxiv_results)} results.")
-
-    print("Running Web Search for PDFs...")
-    web_pdf_results = web_search_pdfs(keywords_list_for_search, days=days_for_search, max_results=max_results_per_source)
-    print(f"Web Search for PDFs returned {len(web_pdf_results)} results.")
-
-    all_results = crossref_results + arxiv_results + web_pdf_results
-
-    print(f"Total results collected: {len(all_results)}")
-
-    processed_results = []
-    end_date = datetime.today()
-    start_date_filter = end_date - timedelta(days=days_for_search)
-
-    print(f"Filtering results within date range: {start_date_filter.date()} to {end_date.date()}")
-
-    filtered_out_by_date = 0
-    filtered_out_by_keywords = 0
-
-    date_formats_to_try = [
-        '%Y-%m-%d', '%Y-%m-%dT%H:%M:%SZ', '%Y', '%Y-%m', '%m/%d/%Y', '%d-%m-%Y',
-        '%Y/%m/%d', '%B %d, %Y', '%b %d, %Y', '%d %B %Y', '%d %b %Y', '%Y%m%d',
-        '%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M:%S%z',
-        '%Y-%m-%dT%H:%M:%S%Z', '%Y-%m-%dT%H:%M:%S.%f'
+    date_formats = [
+        '%Y-%m-%d', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M:%S.%fZ'
     ]
+    start_date = (datetime.today() - timedelta(days=days)).date()
+    end_date = datetime.today().date()
+    filtered_results = []
 
-    for result in all_results:
-        if not isinstance(result, dict):
-            continue
-
-        publication_date_str = result.get('publication_or_filing_date')
-        is_within_date_range = False
-        parsed_date = None
-
-        if publication_date_str and publication_date_str != 'Unknown':
-            for fmt in date_formats_to_try:
-                try:
-                    parsed_date = datetime.strptime(publication_date_str, fmt)
-                    break
-                except (ValueError, TypeError):
-                    continue
-
-            if parsed_date:
-                is_within_date_range = start_date_filter.date() <= parsed_date.date() <= end_date.date()
-            else:
-                is_within_date_range = False
-        else:
-            is_within_date_range = True
-
-        if is_within_date_range:
-            result['matching_keywords'] = []
+    for result in all_arxiv_results:
+        pub_date = result.get('publication_or_filing_date', '')
+        parsed = None
+        for fmt in date_formats:
             try:
-                combined_text = str(result.get('title', '')) + ' ' + \
-                                str(result.get('abstract_or_summary', '')) + ' ' + \
-                                str(result.get('full_text', ''))
+                parsed = datetime.strptime(pub_date, fmt).date()
+                break
+            except Exception:
+                continue
+        if parsed and start_date <= parsed <= end_date:
+            filtered_results.append(result)
 
-                # Explicitly pass keywords_subset for filtering
-                result['matching_keywords'] = find_matching_keywords(combined_text, keywords_subset)
+    return filtered_results
 
-                if len(result.get('matching_keywords', [])) >= 2:
-                     processed_results.append(result)
-                else:
-                     filtered_out_by_keywords += 1
-            except Exception as e:
-                print(f"Error finding matching keywords for a result: {e}. Result title: {result.get('title', 'No Title')}")
-                filtered_out_by_keywords += 1
+def semanticscholar_query(keywords_list, days=30, max_results=50):
+    S2_API_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+    S2_FIELDS = "title,abstract,authors,externalIds,publicationDate,url"
+    all_results = []
+    processed_s2_ids = set()
+    query_string = " OR ".join([f'"{kw}"' if " " in kw else kw for kw in keywords_list])
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=days)
+    date_filter = f"[{start_date.strftime('%Y-%m-%d')} TO {end_date.strftime('%Y-%m-%d')}]"
+    params = {
+        "query": query_string,
+        "fields": S2_FIELDS,
+        "limit": min(100, max_results),
+        "offset": 0,
+        "publicationDate": date_filter
+    }
+    try:
+        response = requests.get(S2_API_URL, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            items = data.get('data', [])
+            for item in items:
+                s2_id = item.get('paperId')
+                if s2_id and s2_id not in processed_s2_ids:
+                    processed_s2_ids.add(s2_id)
+                    title = item.get('title', '')
+                    authors_list = [author.get('name', '') for author in item.get('authors', [])]
+                    abstract = item.get('abstract', '')
+                    pub_date = item.get('publicationDate', '')
+                    doi_or_url = item.get('url', '')
+                    all_results.append({
+                        "type": "academic_publication",
+                        "title": title,
+                        "authors_or_inventors": authors_list,
+                        "abstract_or_summary": abstract,
+                        "publication_or_filing_date": pub_date,
+                        "source": "Semantic Scholar",
+                        "experiment_type": "Unknown",
+                        "key_contributions": "",
+                        "institution_or_assignee": "",
+                        "affiliation_flag": "",
+                        "doi_or_url": doi_or_url
+                    })
+    except Exception as e:
+        print(f"Semantic Scholar error: {e}")
 
-        else:
-            filtered_out_by_date += 1
+    filtered_results = []
+    for result in all_results:
+        pub_date = result.get('publication_or_filing_date', '')
+        parsed = None
+        if pub_date and len(pub_date) >= 10:
+            try:
+                parsed = datetime.strptime(pub_date[:10], "%Y-%m-%d").date()
+            except Exception:
+                continue
+        if parsed and start_date.date() <= parsed <= end_date.date():
+            filtered_results.append(result)
 
-    print(f"Results filtered out by date: {filtered_out_by_date}")
-    print(f"Results filtered out by keyword count (<2): {filtered_out_by_keywords}")
-    print(f"Total results after filtering (within date range OR unknown date AND 2+ keywords): {len(processed_results)}")
+    return filtered_results
 
-    prioritized_results = sorted(processed_results, key=lambda x: len(x.get('matching_keywords', [])), reverse=True)
-    print(f"Total results after prioritizing: {len(prioritized_results)}")
-
-    return prioritized_results
-
-# === MAIN EXECUTION ===
-if __name__ == "__main__":
-    # Ensure keywords_list is defined
-    if 'keywords_list' not in globals():
-        keywords_list = ['explosion', 'EOD', 'ordnance disposal', 'ordnance', 'bomb', 'grenade', 'missile', 'landmine', 'loitering munition', 'torpedo', 'projectile', 'rocket', 'cluster munition', 'unexploded', 'UXO', 'improvised explosive device', 'shaped charge', 'detonator', 'booster charge', 'main charge', 'insensitive munitions', 'reactive materials', 'explosive train', 'energetic material', 'biological weapon', 'biological agents', 'chemical weapon', 'chemical agents', 'radiological dispersal', 'radiological hazards', 'nuclear weapon', 'nuclear materials', 'Novichok', 'cyanide', 'sulfur mustard', 'nerve agents', 'blister agents', 'blood agents', 'choke agents', 'WMD', 'weapons of mass destruction', 'TICs', 'toxic industrial chemicals', 'TIMs', 'toxic industrial materials', 'detonation velocity', 'shock wave propagation', 'blast effects', 'fragmentation', 'sympathetic detonation', 'thermal decomposition', 'hypersonic', 'initiation mechanisms', 'blast fragmentation modeling', 'detection systems', 'neutralization', 'decontamination methods', 'containment strategies', 'protective equipment', 'drone', 'UAV', 'UAS', 'remote sensing', 'counter-IED', 'multi-sensor fusion', 'explosive residue', 'warfare', 'hazard classification', 'remote ordnance disposal', 'advanced fuzing technology', 'hypersonic weapon effects', 'directed energy weapons', 'nanoenergetic', 'fuze', 'CBRN', 'shock initiation', 'shaped charge', 'detonation', 'sensor fusion', 'drone-borne', 'explosive residue', 'RDX', 'CL-20', 'HMX', 'TATP', 'HMTD', 'TNT']
-
-    # Define days_for_search globally
+def run_all_queries_and_filter():
+    keywords_query = " OR ".join([f'"{kw}"' if " " in kw else kw for kw in keywords_subset])
     days_for_search = 30
 
-    print("Running the complete research retrieval pipeline...")
-    results = run_all_queries_and_filter(keywords_list, days_for_search, max_results_per_source=50)
+    print("Querying arXiv...")
+    arxiv_results = arxiv_query(keywords_query, max_results=50, days=days_for_search)
+    print(f"arXiv results: {len(arxiv_results)}")
+    print("Querying Semantic Scholar...")
+    semanticscholar_results = semanticscholar_query(keywords_subset, days=days_for_search, max_results=50)
+    print(f"Semantic Scholar results: {len(semanticscholar_results)}")
+    all_results = arxiv_results + semanticscholar_results
 
-    # Save results locally
+    # Filter for at least 1 matching keyword, add abstract and summary
+    filtered_results = []
+    for result in all_results:
+        title = str(result.get('title', ''))
+        abstract = str(result.get('abstract_or_summary', ''))
+        matches = find_matching_keywords(title + ' ' + abstract, keywords_subset)
+        if len(matches) >= 1:
+            result['matching_keywords'] = matches
+            result['abstract'] = abstract
+            result['military_eod_summary'] = generate_summary(title, abstract)
+            filtered_results.append(result)
+
+    # Sort by number of matching keywords
+    filtered_results.sort(key=lambda x: len(x['matching_keywords']), reverse=True)
+
     with open("results.json", "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(filtered_results, f, indent=2)
+    print(f"✅ {len(filtered_results)} results saved to results.json")
+    return filtered_results
 
-    print("✅ Filtered and prioritized results saved to results.json")
+if __name__ == "__main__":
+    run_all_queries_and_filter()
