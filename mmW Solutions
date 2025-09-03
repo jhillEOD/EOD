@@ -1,0 +1,208 @@
+from datetime import datetime, timedelta
+from urllib.parse import quote_plus
+import json
+import requests
+import urllib.request
+import xml.etree.ElementTree as ET
+
+# Core technology and domain keywords
+keywords_subset = [
+    "mmw solutions", "optical heterodyning", "frequency-locked lasers",
+    "hybrid photonic-electronic architectures", "thz communication",
+    "photonic assisted", "millimeter wave", "terahertz communication",
+    "photonic wireless", "ultra-wideband wireless", "frequency comb"
+]
+# Company and sector keywords for extra filtering
+company_keywords = ["amazon", "aws", "google", "microsoft", "hyperscale"]
+
+def find_matching_keywords(text, keywords_subset):
+    text_lower = text.lower()
+    return [kw for kw in keywords_subset if kw.lower() in text_lower]
+
+def find_company_keywords(text):
+    text_lower = text.lower()
+    matches = [kw for kw in company_keywords if kw in text_lower]
+    return matches
+
+tech_keywords = ['data center', 'data centre', 'hyperscale', 'datacenter']
+training_keywords = ['multi-hop rf', 'optical link', 'rf beam']
+threat_keywords = ['interference']
+hazard_keywords = ['interference']
+
+def generate_summary(title, abstract, company_flags):
+    content = (title + " " + abstract).lower()
+    summary_segments = []
+    if any(word in content for word in tech_keywords):
+        summary_segments.append("The study discusses advances relevant to emerging data center communication technologies.")
+    if any(word in content for word in training_keywords):
+        summary_segments.append("It contributes knowledge applicable to data center communication management.")
+    if any(word in content for word in threat_keywords):
+        summary_segments.append("Findings help illuminate current or emerging millimeter wave or terahertz communication.")
+    if any(word in content for word in hazard_keywords):
+        summary_segments.append("The research examines hazards of wireless communication.")
+    if company_flags:
+        summary_segments.append(f"Mentions company: {', '.join(company_flags)}.")
+    if not summary_segments:
+        summary_segments.append("This research may offer insight into millimeter wave communication policy or operations.")
+    return " ".join(summary_segments)
+
+def arxiv_query(keywords_query, max_results=50, days=30):
+    all_arxiv_results = []
+    processed_urls = set()
+    base_url = 'http://export.arxiv.org/api/query?'
+    escaped_keywords = quote_plus(keywords_query)
+    search_query = f'all:{escaped_keywords}'
+    query_url = f"{base_url}search_query={search_query}&start=0&max_results={max_results}&sortBy=submittedDate"
+    try:
+        with urllib.request.urlopen(query_url) as url_response:
+            response_data = url_response.read().decode('utf-8')
+            atom_namespace = '{http://www.w3.org/2005/Atom}'
+            root = ET.fromstring(response_data)
+            for entry in root.findall(f'{atom_namespace}entry'):
+                title = entry.find(f'{atom_namespace}title').text.strip() if entry.find(f'{atom_namespace}title') is not None else ''
+                abstract = entry.find(f'{atom_namespace}summary').text.strip() if entry.find(f'{atom_namespace}summary') is not None else ''
+                published_date_str = entry.find(f'{atom_namespace}published').text.strip() if entry.find(f'{atom_namespace}published') is not None else ''
+                authors_list = [
+                    author_elem.find(f'{atom_namespace}name').text.strip()
+                    for author_elem in entry.findall(f'{atom_namespace}author')
+                    if author_elem.find(f'{atom_namespace}name') is not None
+                ]
+                if not authors_list:
+                    authors_list = ['Unknown Authors']
+                article_url = next(
+                    (link.get('href') for link in entry.findall(f'{atom_namespace}link')
+                     if link.get('type') == 'text/html' or link.get('rel') == 'alternate'),
+                    ''
+                )
+                if article_url and article_url not in processed_urls:
+                    processed_urls.add(article_url)
+                    all_arxiv_results.append({
+                        "type": "academic_preprint",
+                        "title": title,
+                        "authors_or_inventors": authors_list,
+                        "abstract_or_summary": abstract,
+                        "publication_or_filing_date": published_date_str,
+                        "source": "arXiv",
+                        "experiment_type": "Unknown",
+                        "key_contributions": "",
+                        "institution_or_assignee": "",
+                        "affiliation_flag": "",
+                        "doi_or_url": article_url
+                    })
+    except Exception as e:
+        print(f"arXiv error: {e}")
+
+    date_formats = [
+        '%Y-%m-%d', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M:%S.%fZ'
+    ]
+    start_date = (datetime.today() - timedelta(days=days)).date()
+    end_date = datetime.today().date()
+    filtered_results = []
+    for result in all_arxiv_results:
+        pub_date = result.get('publication_or_filing_date', '')
+        parsed = None
+        for fmt in date_formats:
+            try:
+                parsed = datetime.strptime(pub_date, fmt).date()
+                break
+            except Exception:
+                continue
+        if parsed and start_date <= parsed <= end_date:
+            filtered_results.append(result)
+    return filtered_results
+
+def semanticscholar_query(keywords_list, days=30, max_results=50):
+    S2_API_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+    S2_FIELDS = "title,abstract,authors,externalIds,publicationDate,url"
+    all_results = []
+    processed_s2_ids = set()
+    query_string = " OR ".join([f'"{kw}"' if " " in kw else kw for kw in keywords_list])
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=days)
+    date_filter = f"[{start_date.strftime('%Y-%m-%d')} TO {end_date.strftime('%Y-%m-%d')}]"
+    params = {
+        "query": query_string,
+        "fields": S2_FIELDS,
+        "limit": min(100, max_results),
+        "offset": 0,
+        "publicationDate": date_filter
+    }
+    try:
+        response = requests.get(S2_API_URL, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            items = data.get('data', [])
+            for item in items:
+                s2_id = item.get('paperId')
+                if s2_id and s2_id not in processed_s2_ids:
+                    processed_s2_ids.add(s2_id)
+                    title = item.get('title', '')
+                    authors_list = [author.get('name', '') for author in item.get('authors', [])]
+                    abstract = item.get('abstract', '')
+                    pub_date = item.get('publicationDate', '')
+                    doi_or_url = item.get('url', '')
+                    all_results.append({
+                        "type": "academic_publication",
+                        "title": title,
+                        "authors_or_inventors": authors_list,
+                        "abstract_or_summary": abstract,
+                        "publication_or_filing_date": pub_date,
+                        "source": "Semantic Scholar",
+                        "experiment_type": "Unknown",
+                        "key_contributions": "",
+                        "institution_or_assignee": "",
+                        "affiliation_flag": "",
+                        "doi_or_url": doi_or_url
+                    })
+    except Exception as e:
+        print(f"Semantic Scholar error: {e}")
+
+    filtered_results = []
+    for result in all_results:
+        pub_date = result.get('publication_or_filing_date', '')
+        parsed = None
+        if pub_date and len(pub_date) >= 10:
+            try:
+                parsed = datetime.strptime(pub_date[:10], "%Y-%m-%d").date()
+            except Exception:
+                continue
+        if parsed and start_date.date() <= parsed <= end_date.date():
+            filtered_results.append(result)
+    return filtered_results
+
+def run_all_queries_and_filter():
+    keywords_query = " OR ".join([f'"{kw}"' if " " in kw else kw for kw in keywords_subset])
+    days_for_search = 30
+
+    print("Querying arXiv...")
+    arxiv_results = arxiv_query(keywords_query, max_results=50, days=days_for_search)
+    print(f"arXiv results: {len(arxiv_results)}")
+    print("Querying Semantic Scholar...")
+    semanticscholar_results = semanticscholar_query(keywords_subset, days=days_for_search, max_results=50)
+    print(f"Semantic Scholar results: {len(semanticscholar_results)}")
+    all_results = arxiv_results + semanticscholar_results
+
+    # Filter and flag company involvement
+    filtered_results = []
+    for result in all_results:
+        title = str(result.get('title', ''))
+        abstract = str(result.get('abstract_or_summary', ''))
+        matches = find_matching_keywords(title + ' ' + abstract, keywords_subset)
+        company_flags = find_company_keywords(title + ' ' + abstract)
+        if len(matches) >= 1:
+            result['matching_keywords'] = matches
+            result['company_flag'] = company_flags
+            result['abstract'] = abstract
+            result['military_eod_summary'] = generate_summary(title, abstract, company_flags)
+            filtered_results.append(result)
+
+    # Sort by matching keyword occurrence and company involvement
+    filtered_results.sort(key=lambda x: (len(x['company_flag']), len(x['matching_keywords'])), reverse=True)
+
+    with open("results.json", "w") as f:
+        json.dump(filtered_results, f, indent=2)
+    print(f"✅ {len(filtered_results)} results saved to results.json")
+    return filtered_results
+
+if __name__ == "__main__":
+    run_all_queries_and_filter()
